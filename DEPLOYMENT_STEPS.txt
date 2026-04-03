@@ -1,0 +1,361 @@
+# 🚀 VPS Deployment Guide
+
+## 1️⃣ Upload to VPS
+
+### Option A: Git Clone (Recommended)
+```bash
+# On your VPS
+cd /var/www
+git clone <your-repo-url> inventory-backend
+cd inventory-backend
+```
+
+### Option B: SCP Upload
+```bash
+# From your local machine
+scp -r "c:\Users\n\Desktop\it\backend1 - Copy"/* user@your-vps-ip:/var/www/inventory-backend
+```
+
+---
+
+## 2️⃣ Install Docker & Docker Compose
+
+```bash
+# Update system
+sudo apt update && sudo apt upgrade -y
+
+# Install Docker
+curl -fsSL https://get.docker.com -o get-docker.sh
+sudo sh get-docker.sh
+
+# Add user to docker group
+sudo usermod -aG docker $USER
+
+# Install Docker Compose
+sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+sudo chmod +x /usr/local/bin/docker-compose
+
+# Verify installation
+docker --version
+docker-compose --version
+```
+
+**Logout and login again for group changes to take effect.**
+
+---
+
+## 3️⃣ Configure Environment
+
+```bash
+cd /var/www/inventory-backend
+
+# Create .env file
+nano .env
+```
+
+Add this content:
+
+```env
+# Security - CHANGE THESE!
+DB_PASSWORD=YourSecureDatabasePassword123!
+JWT_SECRET=YourSuperSecretRandomStringAtLeast32CharactersLong
+BCRYPT_ROUNDS=12
+
+# Frontend URL (your React app domain)
+FRONTEND_URL=https://your-react-app.com
+
+# Database
+DB_HOST=localhost
+DB_PORT=5432
+DB_NAME=inventory_db
+DB_USER=postgres
+DB_SSL=false
+
+# Server
+PORT=5000
+NODE_ENV=production
+```
+
+**Press Ctrl+X, Y, Enter to save**
+
+---
+
+## 4️⃣ Deploy with Docker Compose
+
+```bash
+# Start containers
+sudo docker-compose -f docker-compose.prod.yml up -d
+
+# Check status
+sudo docker-compose -f docker-compose.prod.yml ps
+
+# View logs
+sudo docker-compose -f docker-compose.prod.yml logs -f
+```
+
+---
+
+## 5️⃣ Setup Nginx Reverse Proxy
+
+```bash
+# Install Nginx
+sudo apt install nginx -y
+
+# Create Nginx config
+sudo nano /etc/nginx/sites-available/inventory-backend
+```
+
+Add this config:
+
+```nginx
+server {
+    listen 80;
+    server_name api.your-domain.com;
+
+    location / {
+        proxy_pass http://localhost:5000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Rate limiting
+    limit_req_zone $binary_remote_addr zone=api_limit:10m rate=10r/s;
+    limit_req zone=api_limit burst=20 nodelay;
+}
+```
+
+**Enable the site:**
+```bash
+sudo ln -s /etc/nginx/sites-available/inventory-backend /etc/nginx/sites-enabled/
+sudo nginx -t
+sudo systemctl restart nginx
+```
+
+---
+
+## 6️⃣ Setup SSL with Let's Encrypt
+
+```bash
+# Install Certbot
+sudo apt install certbot python3-certbot-nginx -y
+
+# Get SSL certificate
+sudo certbot --nginx -d api.your-domain.com
+
+# Auto-renewal is setup automatically
+```
+
+---
+
+## 7️⃣ Initialize Database
+
+```bash
+# Wait for containers to start (30 seconds)
+sleep 30
+
+# Run database setup
+sudo docker exec inventory_backend npm run setup-db
+
+# Run migrations
+sudo docker exec inventory_backend npm run migrate
+
+# Create admin user
+sudo docker exec inventory_backend curl -X POST http://localhost:5000/api/users/setup-admin \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Admin",
+    "email": "admin@your-domain.com",
+    "password": "Admin@123456"
+  }'
+```
+
+---
+
+## 8️⃣ Test Your API
+
+```bash
+# Test health endpoint
+curl https://api.your-domain.com/health
+
+# Test login
+curl -X POST https://api.your-domain.com/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "admin@your-domain.com",
+    "password": "Admin@123456"
+  }'
+```
+
+---
+
+## 9️⃣ Connect React App
+
+In your React project `.env` file:
+
+```env
+REACT_APP_API_URL=https://api.your-domain.com/api
+```
+
+Example API call from React:
+
+```javascript
+const API_BASE = process.env.REACT_APP_API_URL;
+
+// Login
+const login = async (email, password) => {
+  const response = await fetch(`${API_BASE}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  });
+  const data = await response.json();
+  
+  // Save token
+  localStorage.setItem('token', data.data.token);
+  return data;
+};
+
+// Protected API call
+const getInventory = async () => {
+  const token = localStorage.getItem('token');
+  const response = await fetch(`${API_BASE}/inventory`, {
+    headers: {
+      'Authorization': `Bearer ${token}`,
+    },
+  });
+  return await response.json();
+};
+```
+
+---
+
+## 🔒 Firewall Configuration
+
+```bash
+# Allow HTTP/HTTPS
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+
+# Block direct access to port 5000 (optional, if using Nginx)
+sudo ufw deny 5000/tcp
+
+# Enable firewall
+sudo ufw enable
+```
+
+---
+
+## 📊 Monitoring & Maintenance
+
+### View Logs
+```bash
+# Backend logs
+sudo docker logs inventory_backend -f
+
+# Database logs
+sudo docker logs inventory_postgres -f
+
+# Nginx logs
+sudo tail -f /var/log/nginx/access.log
+sudo tail -f /var/log/nginx/error.log
+```
+
+### Backup Database
+```bash
+# Create backup
+sudo docker exec inventory_postgres pg_dump -U postgres inventory_db > backup_$(date +%Y%m%d).sql
+
+# Restore backup
+sudo docker exec -i inventory_postgres psql -U postgres inventory_db < backup_20260403.sql
+```
+
+### Update Application
+```bash
+cd /var/www/inventory-backend
+
+# Pull latest code
+git pull
+
+# Rebuild and restart
+sudo docker-compose -f docker-compose.prod.yml down
+sudo docker-compose -f docker-compose.prod.yml up -d --build
+
+# Run new migrations (if any)
+sudo docker exec inventory_backend npm run migrate
+```
+
+---
+
+## ⚡ Quick Commands Reference
+
+| Task | Command |
+|------|---------|
+| Start all containers | `sudo docker-compose -f docker-compose.prod.yml up -d` |
+| Stop all containers | `sudo docker-compose -f docker-compose.prod.yml down` |
+| Restart backend | `sudo docker restart inventory_backend` |
+| View logs | `sudo docker-compose -f docker-compose.prod.yml logs -f` |
+| Access backend shell | `sudo docker exec -it inventory_backend sh` |
+| Access DB shell | `sudo docker exec -it inventory_postgres psql -U postgres` |
+| Check disk usage | `sudo docker system df` |
+| Cleanup unused data | `sudo docker system prune -a` |
+
+---
+
+## 🆘 Troubleshooting
+
+### Container won't start
+```bash
+# Check logs
+sudo docker-compose -f docker-compose.prod.yml logs backend
+
+# Verify .env file
+cat .env | grep -v PASSWORD | grep -v SECRET
+```
+
+### Database connection failed
+```bash
+# Check if postgres is running
+sudo docker ps | grep postgres
+
+# Test connection
+sudo docker exec inventory_backend curl http://localhost:5000/health
+```
+
+### Nginx errors
+```bash
+# Test configuration
+sudo nginx -t
+
+# Restart Nginx
+sudo systemctl restart nginx
+```
+
+---
+
+## ✅ Final Checklist
+
+- [ ] Docker installed
+- [ ] .env configured with secure passwords
+- [ ] Containers running (`sudo docker ps`)
+- [ ] Database initialized
+- [ ] Admin user created
+- [ ] Nginx configured
+- [ ] SSL certificate installed
+- [ ] Firewall configured
+- [ ] React app connected
+- [ ] Health check passing
+
+---
+
+**Your backend is now live on your VPS!** 🎉
+
+Access points:
+- **API:** `https://api.your-domain.com/api`
+- **Docs:** `https://api.your-domain.com/api-docs`
+- **Health:** `https://api.your-domain.com/health`
